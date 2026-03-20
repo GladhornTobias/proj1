@@ -1,1 +1,290 @@
 
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Rotierende Kugel</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Space+Mono:ital@0;1&display=swap');
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #07080d;
+      --glow: #4af0c8;
+      --accent: #e040fb;
+      --text: #c8d8e8;
+    }
+
+    body {
+      background: var(--bg);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      font-family: 'Space Mono', monospace;
+      overflow: hidden;
+    }
+
+    /* Hintergrund-Raster */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(74,240,200,0.04) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(74,240,200,0.04) 1px, transparent 1px);
+      background-size: 40px 40px;
+      pointer-events: none;
+    }
+
+    h1 {
+      color: var(--text);
+      letter-spacing: 0.2em;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      margin-bottom: 2.5rem;
+      opacity: 0.5;
+    }
+
+    .scene {
+      perspective: 900px;
+      width: 320px;
+      height: 320px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+    }
+
+    /* Glow-Ring unter der Kugel */
+    .scene::after {
+      content: '';
+      position: absolute;
+      bottom: -18px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 180px;
+      height: 24px;
+      background: radial-gradient(ellipse, rgba(74,240,200,0.25) 0%, transparent 70%);
+      filter: blur(6px);
+      border-radius: 50%;
+    }
+
+    canvas {
+      border-radius: 50%;
+      box-shadow:
+        0 0 60px rgba(74,240,200,0.15),
+        0 0 120px rgba(224,64,251,0.08),
+        inset 0 0 40px rgba(0,0,0,0.6);
+      cursor: grab;
+    }
+    canvas:active { cursor: grabbing; }
+
+    .info {
+      margin-top: 2.5rem;
+      color: var(--glow);
+      font-size: 0.65rem;
+      letter-spacing: 0.15em;
+      opacity: 0.45;
+    }
+  </style>
+</head>
+<body>
+  <h1>Sphere · Rotation</h1>
+  <div class="scene">
+    <canvas id="sphere" width="280" height="280"></canvas>
+  </div>
+  <p class="info">drag to rotate &nbsp;·&nbsp; scroll to zoom</p>
+
+  <script>
+    // ─────────────────────────────────────────────────────────────
+    //  PNG-TEXTUR EINBINDEN
+    //  Ersetze den leeren String mit dem Pfad zu deiner PNG-Datei:
+    //
+    //    const TEXTURE_SRC = 'meine-textur.png';
+    //
+    //  Ohne Textur wird ein Fallback-Farbverlauf gerendert.
+    // ─────────────────────────────────────────────────────────────
+    const TEXTURE_SRC = '';   // <── hier deinen PNG-Pfad eintragen
+
+    const canvas = document.getElementById('sphere');
+    const ctx    = canvas.getContext('2d');
+    const W = canvas.width, H = canvas.height, R = W / 2 - 4;
+
+    // Kamera-Zustand
+    let rotX = 0.3, rotY = 0, rotZ = 0;
+    let autoSpeed = 0.004;
+    let dragging = false, lastX = 0, lastY = 0;
+    let scale = 1;
+
+    // Textur laden (optional)
+    let texImg = null, texReady = false;
+    if (TEXTURE_SRC) {
+      texImg = new Image();
+      texImg.crossOrigin = 'anonymous';
+      texImg.onload  = () => { texReady = true; };
+      texImg.onerror = () => { texReady = false; console.warn('Textur konnte nicht geladen werden.'); };
+      texImg.src = TEXTURE_SRC;
+    }
+
+    // ── Hilfs-Matrizen ──────────────────────────────────────────
+    function rotatePoint(px, py, pz, rx, ry) {
+      // Rotation um Y
+      let x1 =  px * Math.cos(ry) + pz * Math.sin(ry);
+      let z1 = -px * Math.sin(ry) + pz * Math.cos(ry);
+      // Rotation um X
+      let y2 =  py * Math.cos(rx) - z1 * Math.sin(rx);
+      let z2 =  py * Math.sin(rx) + z1 * Math.cos(rx);
+      return [x1, y2, z2];
+    }
+
+    // ── Textur-Pixel samplen ─────────────────────────────────────
+    let texCanvas, texCtx, texData;
+    function prepareTexture() {
+      if (!texReady || texCanvas) return;
+      texCanvas = document.createElement('canvas');
+      texCanvas.width  = texImg.naturalWidth;
+      texCanvas.height = texImg.naturalHeight;
+      texCtx = texCanvas.getContext('2d');
+      texCtx.drawImage(texImg, 0, 0);
+      texData = texCtx.getImageData(0, 0, texCanvas.width, texCanvas.height);
+    }
+
+    function sampleTexture(u, v) {
+      if (!texData) return null;
+      const tw = texData.width, th = texData.height;
+      const tx = Math.floor(((u % 1 + 1) % 1) * tw);
+      const ty = Math.floor(((v % 1 + 1) % 1) * th);
+      const i  = (ty * tw + tx) * 4;
+      return texData.data.slice(i, i + 4);
+    }
+
+    // ── Kugel zeichnen ───────────────────────────────────────────
+    function draw() {
+      ctx.clearRect(0, 0, W, H);
+
+      const cx = W / 2, cy = H / 2;
+      const r  = R * scale;
+      const step = 2; // Pixel-Schrittweite (kleiner = schärfer, langsamer)
+
+      prepareTexture();
+
+      // Lichtrichtung (normiert)
+      const lx = 0.5, ly = -0.7, lz = 0.5;
+      const lLen = Math.sqrt(lx*lx + ly*ly + lz*lz);
+
+      const imgData = ctx.createImageData(W, H);
+
+      for (let py = Math.ceil(cy - r); py <= cy + r; py += step) {
+        for (let px = Math.ceil(cx - r); px <= cx + r; px += step) {
+          const dx = (px - cx) / r;
+          const dy = (py - cy) / r;
+          const d2 = dx*dx + dy*dy;
+          if (d2 > 1) continue;
+
+          const dz = Math.sqrt(1 - d2);
+
+          // Oberflächen-Normale (im Kugelraum) → rückrotieren
+          const [nx, ny, nz] = rotatePoint(dx, dy, dz, -rotX, -rotY);
+
+          // UV-Koordinaten (Kugelprojektion)
+          const u = 0.5 + Math.atan2(nz, nx) / (2 * Math.PI);
+          const v = 0.5 - Math.asin(Math.max(-1, Math.min(1, ny))) / Math.PI;
+
+          // Diffuses Licht
+          const [rlx, rly, rlz] = rotatePoint(lx/lLen, ly/lLen, lz/lLen, 0, 0);
+          const diff = Math.max(0, dx * rlx + dy * rly + dz * rlz);
+          const ambient = 0.18;
+          const lit = ambient + (1 - ambient) * diff;
+
+          // Spekulares Highlight
+          const spec = Math.pow(Math.max(0, dz * 0.7 + diff * 0.3), 28) * 0.55;
+
+          let cr, cg, cb;
+
+          if (texReady && texData) {
+            const px4 = sampleTexture(u, v);
+            cr = px4[0]; cg = px4[1]; cb = px4[2];
+          } else {
+            // Fallback-Farbverlauf (Teal → Lila)
+            const hue1 = [74, 240, 200];   // #4af0c8
+            const hue2 = [224, 64, 251];   // #e040fb
+            const t = (Math.sin(u * Math.PI * 2 + v * Math.PI) * 0.5 + 0.5);
+            cr = hue1[0] * (1-t) + hue2[0] * t;
+            cg = hue1[1] * (1-t) + hue2[1] * t;
+            cb = hue1[2] * (1-t) + hue2[2] * t;
+          }
+
+          const fr = Math.min(255, cr * lit + spec * 255);
+          const fg = Math.min(255, cg * lit + spec * 255);
+          const fb = Math.min(255, cb * lit + spec * 255);
+
+          // Pixel füllen (step × step Block)
+          for (let by = 0; by < step && py+by < H; by++) {
+            for (let bx = 0; bx < step && px+bx < W; bx++) {
+              const idx = ((py + by) * W + (px + bx)) * 4;
+              imgData.data[idx]   = fr;
+              imgData.data[idx+1] = fg;
+              imgData.data[idx+2] = fb;
+              imgData.data[idx+3] = 255;
+            }
+          }
+        }
+      }
+
+      ctx.putImageData(imgData, 0, 0);
+
+      // Glanz-Overlay (CSS-Effekt, schnell)
+      const grad = ctx.createRadialGradient(cx - r*0.3, cy - r*0.35, r*0.02, cx, cy, r);
+      grad.addColorStop(0,   'rgba(255,255,255,0.22)');
+      grad.addColorStop(0.4, 'rgba(255,255,255,0.04)');
+      grad.addColorStop(1,   'rgba(0,0,0,0)');
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI*2);
+      ctx.fillStyle = grad;
+      ctx.fill();
+    }
+
+    // ── Animations-Loop ──────────────────────────────────────────
+    function loop() {
+      if (!dragging) rotY += autoSpeed;
+      draw();
+      requestAnimationFrame(loop);
+    }
+
+    // ── Maus / Touch ─────────────────────────────────────────────
+    canvas.addEventListener('mousedown', e => {
+      dragging = true; lastX = e.clientX; lastY = e.clientY;
+    });
+    window.addEventListener('mouseup',   () => dragging = false);
+    window.addEventListener('mousemove', e => {
+      if (!dragging) return;
+      rotY += (e.clientX - lastX) * 0.008;
+      rotX += (e.clientY - lastY) * 0.008;
+      lastX = e.clientX; lastY = e.clientY;
+    });
+
+    canvas.addEventListener('wheel', e => {
+      e.preventDefault();
+      scale = Math.max(0.4, Math.min(1.6, scale - e.deltaY * 0.001));
+    }, { passive: false });
+
+    canvas.addEventListener('touchstart', e => {
+      dragging = true;
+      lastX = e.touches[0].clientX; lastY = e.touches[0].clientY;
+    });
+    window.addEventListener('touchend', () => dragging = false);
+    window.addEventListener('touchmove', e => {
+      if (!dragging) return;
+      rotY += (e.touches[0].clientX - lastX) * 0.01;
+      rotX += (e.touches[0].clientY - lastY) * 0.01;
+      lastX = e.touches[0].clientX; lastY = e.touches[0].clientY;
+    });
+
+    loop();
+  </script>
+</body>
+</html>
